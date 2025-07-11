@@ -23,6 +23,7 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 
 redis = None
 pg_conn = None
+channel_map = {}  # channelID -> (channel_name, pair)
 
 def init_pg():
     global pg_conn
@@ -132,6 +133,7 @@ async def handle_orderbook(pair, data):
         logger.error(traceback.format_exc())
 
 async def collector(pairs=["XBT/USD"]):
+    global channel_map
     url = "wss://ws.kraken.com"
 
     async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
@@ -152,24 +154,34 @@ async def collector(pairs=["XBT/USD"]):
                 msg_data = json.loads(message)
 
                 if isinstance(msg_data, dict):
-                    if msg_data.get("event") in {"subscriptionStatus", "heartbeat"}:
+                    if msg_data.get("event") == "subscriptionStatus" and msg_data.get("status") == "subscribed":
+                        channel_id = msg_data["channelID"]
+                        channel_name = msg_data["subscription"]["name"]
+                        pair = msg_data["pair"]
+                        channel_map[channel_id] = (channel_name, pair)
+                        logger.info(f"Mapped channelID {channel_id} to ({channel_name}, {pair})")
                         continue
 
-                if isinstance(msg_data, list) and len(msg_data) >= 4:
-                    channel_info = msg_data[2]
-                    pair = msg_data[3]
-                    data = msg_data[1]
+                    if msg_data.get("event") in {"heartbeat"}:
+                        continue
 
-                    if isinstance(channel_info, str):
-                        if channel_info == "trade":
+                elif isinstance(msg_data, list) and len(msg_data) >= 3:
+                    channel_id = msg_data[0]
+                    data = msg_data[1]
+                    meta = msg_data[2]
+                    pair = None
+
+                    if channel_id in channel_map:
+                        channel_name, pair = channel_map[channel_id]
+                        if channel_name == "trade":
                             await handle_trade(pair, data)
-                        elif channel_info.startswith("book"):
+                        elif channel_name == "book":
                             await handle_orderbook(pair, data)
                     else:
-                        logger.warning(f"Unexpected channel format: {channel_info}")
+                        logger.warning(f"Unknown channel ID: {channel_id} -> {meta}")
 
                 else:
-                    logger.debug(f"Ignored message: {msg_data}")
+                    logger.debug(f"Unrecognized message format: {msg_data}")
 
             except Exception:
                 logger.error("Stream error:")
