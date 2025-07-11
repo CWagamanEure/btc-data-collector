@@ -95,29 +95,36 @@ async def handle_trade(pair, data):
 
 
 async def handle_orderbook(pair, data):
-    if "as" in data and "bs" in data:
-        asks = data["as"]
-        bids = data["bs"]
+    event_time = datetime.utcnow().replace(tzinfo=timezone.utc)
+
+    if "as" in data or "bs" in data:
+        asks = data.get("as", [])
+        bids = data.get("bs", [])
+        update_type = "snapshot"
+    elif "a" in data or "b" in data:
+        asks = data.get("a", [])
+        bids = data.get("b", [])
+        update_type = "update"
     else:
         return
 
-    if not asks or not bids:
+    if not asks and not bids:
         return
 
-    event_time = datetime.utcnow().replace(tzinfo=timezone.utc)
     record = {
         "event_time": event_time,
         "pair": pair,
         "bids": bids,
-        "asks": asks
+        "asks": asks,
+        "type": update_type
     }
 
     try:
         with pg_conn.cursor() as cursor:
             cursor.execute("""
-                INSERT INTO kraken_orderbook (event_time, pair, bids, asks)
-                VALUES (%s, %s, %s, %s);
-            """, (event_time, pair, json.dumps(bids), json.dumps(asks)))
+                INSERT INTO kraken_orderbook (event_time, pair, bids, asks, type)
+                VALUES (%s, %s, %s, %s, %s);
+            """, (event_time, pair, json.dumps(bids), json.dumps(asks), update_type))
         pg_conn.commit()
 
         if redis:
@@ -128,44 +135,6 @@ async def handle_orderbook(pair, data):
         logger.error("Failed to handle orderbook:")
         logger.error(traceback.format_exc())
 
-
-async def collector(pairs=["XBT/USD"]):
-    url = "wss://ws.kraken.com"
-
-    async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-        await ws.send(json.dumps({
-            "event": "subscribe",
-            "pair": pairs,
-            "subscription": {"name": "trade"}
-        }))
-        await ws.send(json.dumps({
-            "event": "subscribe",
-            "pair": pairs,
-            "subscription": {"name": "book", "depth": 10}
-        }))
-        logger.info("Subscribed to Kraken streams")
-
-        async for message in ws:
-            try:
-                msg_data = json.loads(message)
-
-                if isinstance(msg_data, dict):
-                    if msg_data.get("event") in {"subscriptionStatus", "heartbeat"}:
-                        continue
-
-                if isinstance(msg_data, list) and len(msg_data) >= 4:
-                    channel = msg_data[2]
-                    pair = msg_data[3]
-                    data = msg_data[1]
-
-                    if channel == "trade":
-                        await handle_trade(pair, data)
-                    elif channel == "book-10":
-                        await handle_orderbook(pair, data)
-
-            except Exception:
-                logger.error("Stream error:")
-                logger.error(traceback.format_exc())
 
 
 async def main():
