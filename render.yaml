@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: kraken-collector
+    runtime: python
+    repo: https://github.com/CWagamanEure/btc-data-collector
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python kraken_collector.py
+    envVars:
+      - key: POSTGRES_HOST
+        value: your-supabase-host.supabase.co
+      - key: POSTGRES_PORT
+        value: 5432
+      - key: POSTGRES_USER
+        value: postgres
+      - key: POSTGRES_PASSWORD
+        value: your-password
+      - key: POSTGRES_DB
+        value: postgres
+      - key: REDIS_HOST
+        value: your-redis-host-if-used
+    plan: free
+    autoDeploy: true
