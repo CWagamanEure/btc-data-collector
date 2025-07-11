@@ -17,14 +17,13 @@ POSTGRES_DSN = os.getenv("DATABASE_URL")
 if not POSTGRES_DSN:
     raise ValueError("Missing DATABASE_URL in environment variables")
 
-# Redis will not be used in cloud (or could be optional)
+# Redis is optional
 USE_REDIS = os.getenv("USE_REDIS", "false").lower() == "true"
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 
 redis = None
 pg_conn = None
-
 
 def init_pg():
     global pg_conn
@@ -47,7 +46,8 @@ def init_pg():
             event_time TIMESTAMP,
             pair TEXT,
             bids JSONB,
-            asks JSONB
+            asks JSONB,
+            type TEXT DEFAULT 'snapshot'
         );
         """)
     pg_conn.commit()
@@ -135,6 +135,44 @@ async def handle_orderbook(pair, data):
         logger.error("Failed to handle orderbook:")
         logger.error(traceback.format_exc())
 
+
+async def collector(pairs=["XBT/USD"]):
+    url = "wss://ws.kraken.com"
+
+    async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+        await ws.send(json.dumps({
+            "event": "subscribe",
+            "pair": pairs,
+            "subscription": {"name": "trade"}
+        }))
+        await ws.send(json.dumps({
+            "event": "subscribe",
+            "pair": pairs,
+            "subscription": {"name": "book", "depth": 1000}
+        }))
+        logger.info("Subscribed to Kraken streams")
+
+        async for message in ws:
+            try:
+                msg_data = json.loads(message)
+
+                if isinstance(msg_data, dict):
+                    if msg_data.get("event") in {"subscriptionStatus", "heartbeat"}:
+                        continue
+
+                if isinstance(msg_data, list) and len(msg_data) >= 4:
+                    channel = msg_data[2]
+                    pair = msg_data[3]
+                    data = msg_data[1]
+
+                    if channel == "trade":
+                        await handle_trade(pair, data)
+                    elif channel.startswith("book"):
+                        await handle_orderbook(pair, data)
+
+            except Exception:
+                logger.error("Stream error:")
+                logger.error(traceback.format_exc())
 
 
 async def main():
