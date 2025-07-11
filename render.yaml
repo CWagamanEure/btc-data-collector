@@ -19,5 +19,7 @@ services:
         value: postgres
       - key: REDIS_HOST
         value: your-redis-host-if-used
+      - key: DATABASE_URL
+        value: your-url
     plan: free
     autoDeploy: true
