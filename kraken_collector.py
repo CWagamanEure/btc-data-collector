@@ -17,7 +17,6 @@ POSTGRES_DSN = os.getenv("DATABASE_URL")
 if not POSTGRES_DSN:
     raise ValueError("Missing DATABASE_URL in environment variables")
 
-# Redis is optional
 USE_REDIS = os.getenv("USE_REDIS", "false").lower() == "true"
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
@@ -52,13 +51,11 @@ def init_pg():
         """)
     pg_conn.commit()
 
-
 async def init_redis():
     global redis
     if USE_REDIS:
         redis = aioredis.from_url(f"redis://{REDIS_HOST}:{REDIS_PORT}")
         logger.info("Connected to Redis")
-
 
 async def handle_trade(pair, data):
     for trade in data:
@@ -92,7 +89,6 @@ async def handle_trade(pair, data):
         except Exception:
             logger.error("Failed to handle trade:")
             logger.error(traceback.format_exc())
-
 
 async def handle_orderbook(pair, data):
     event_time = datetime.utcnow().replace(tzinfo=timezone.utc)
@@ -135,7 +131,6 @@ async def handle_orderbook(pair, data):
         logger.error("Failed to handle orderbook:")
         logger.error(traceback.format_exc())
 
-
 async def collector(pairs=["XBT/USD"]):
     url = "wss://ws.kraken.com"
 
@@ -161,19 +156,24 @@ async def collector(pairs=["XBT/USD"]):
                         continue
 
                 if isinstance(msg_data, list) and len(msg_data) >= 4:
-                    channel = msg_data[2]
+                    channel_info = msg_data[2]
                     pair = msg_data[3]
                     data = msg_data[1]
 
-                    if channel == "trade":
-                        await handle_trade(pair, data)
-                    elif channel.startswith("book"):
-                        await handle_orderbook(pair, data)
+                    if isinstance(channel_info, str):
+                        if channel_info == "trade":
+                            await handle_trade(pair, data)
+                        elif channel_info.startswith("book"):
+                            await handle_orderbook(pair, data)
+                    else:
+                        logger.warning(f"Unexpected channel format: {channel_info}")
+
+                else:
+                    logger.debug(f"Ignored message: {msg_data}")
 
             except Exception:
                 logger.error("Stream error:")
                 logger.error(traceback.format_exc())
-
 
 async def main():
     init_pg()
@@ -185,7 +185,6 @@ async def main():
             logger.error("Collector crashed. Restarting in 5s...")
             logger.error(traceback.format_exc())
             await asyncio.sleep(5)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
