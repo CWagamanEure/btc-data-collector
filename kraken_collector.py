@@ -14,41 +14,51 @@ from loguru import logger
 load_dotenv()
 
 POSTGRES_DSN = os.getenv("DATABASE_URL")
+if not POSTGRES_DSN:
+    raise ValueError("Missing DATABASE_URL in environment variables")
 
-
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+# Redis will not be used in cloud (or could be optional)
+USE_REDIS = os.getenv("USE_REDIS", "false").lower() == "true"
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 
-# Init PostgreSQL connection
-pg_conn = psycopg2.connect(POSTGRES_DSN)
-pg_conn.autocommit = False
-
-with pg_conn.cursor() as cursor:
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS kraken_trades (
-        event_time TIMESTAMP,
-        pair TEXT,
-        price NUMERIC,
-        volume NUMERIC,
-        side TEXT,
-        order_type TEXT
-    );
-    """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS kraken_orderbook (
-        event_time TIMESTAMP,
-        pair TEXT,
-        bids JSONB,
-        asks JSONB
-    );
-    """)
-pg_conn.commit()
-
 redis = None
+pg_conn = None
+
+
+def init_pg():
+    global pg_conn
+    pg_conn = psycopg2.connect(POSTGRES_DSN)
+    pg_conn.autocommit = False
+
+    with pg_conn.cursor() as cursor:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS kraken_trades (
+            event_time TIMESTAMP,
+            pair TEXT,
+            price NUMERIC,
+            volume NUMERIC,
+            side TEXT,
+            order_type TEXT
+        );
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS kraken_orderbook (
+            event_time TIMESTAMP,
+            pair TEXT,
+            bids JSONB,
+            asks JSONB
+        );
+        """)
+    pg_conn.commit()
+
 
 async def init_redis():
     global redis
-    redis = aioredis.from_url(f"redis://{REDIS_HOST}:{REDIS_PORT}")
+    if USE_REDIS:
+        redis = aioredis.from_url(f"redis://{REDIS_HOST}:{REDIS_PORT}")
+        logger.info("Connected to Redis")
+
 
 async def handle_trade(pair, data):
     for trade in data:
@@ -69,31 +79,30 @@ async def handle_trade(pair, data):
             }
 
             with pg_conn.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO kraken_trades (event_time, pair, price, volume, side, order_type) VALUES (%s, %s, %s, %s, %s, %s);",
-                    (timestamp, pair, price, volume, side, order_type)
-                )
+                cursor.execute("""
+                    INSERT INTO kraken_trades (event_time, pair, price, volume, side, order_type)
+                    VALUES (%s, %s, %s, %s, %s, %s);
+                """, (timestamp, pair, price, volume, side, order_type))
             pg_conn.commit()
 
-            record_json = record.copy()
-            record_json["event_time"] = record_json["event_time"].isoformat()
-            await redis.publish("kraken_trades", json.dumps(record_json))
-            logger.debug(f"Trade: {record_json}")
+            if redis:
+                record_json = {**record, "event_time": timestamp.isoformat()}
+                await redis.publish("kraken_trades", json.dumps(record_json))
 
         except Exception:
             logger.error("Failed to handle trade:")
             logger.error(traceback.format_exc())
 
+
 async def handle_orderbook(pair, data):
-    # Only save full snapshots
     if "as" in data and "bs" in data:
         asks = data["as"]
         bids = data["bs"]
     else:
-        return  # Skip updates
+        return
 
     if not asks or not bids:
-        return  # Require both
+        return
 
     event_time = datetime.utcnow().replace(tzinfo=timezone.utc)
     record = {
@@ -105,20 +114,20 @@ async def handle_orderbook(pair, data):
 
     try:
         with pg_conn.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO kraken_orderbook (event_time, pair, bids, asks) VALUES (%s, %s, %s, %s);",
-                (event_time, pair, json.dumps(bids), json.dumps(asks))
-            )
+            cursor.execute("""
+                INSERT INTO kraken_orderbook (event_time, pair, bids, asks)
+                VALUES (%s, %s, %s, %s);
+            """, (event_time, pair, json.dumps(bids), json.dumps(asks)))
         pg_conn.commit()
 
-        record_json = record.copy()
-        record_json["event_time"] = record_json["event_time"].isoformat()
-        await redis.publish("kraken_orderbook", json.dumps(record_json))
-        logger.debug(f"Stored full snapshot: {pair} @ {event_time.isoformat()}")
+        if redis:
+            record_json = {**record, "event_time": event_time.isoformat()}
+            await redis.publish("kraken_orderbook", json.dumps(record_json))
 
     except Exception:
         logger.error("Failed to handle orderbook:")
         logger.error(traceback.format_exc())
+
 
 async def collector(pairs=["XBT/USD"]):
     url = "wss://ws.kraken.com"
@@ -141,12 +150,8 @@ async def collector(pairs=["XBT/USD"]):
                 msg_data = json.loads(message)
 
                 if isinstance(msg_data, dict):
-                    event = msg_data.get("event")
-                    if event == "subscriptionStatus":
-                        logger.info(f"Subscription confirmed: {msg_data}")
-                    elif event == "heartbeat":
-                        logger.debug("Heartbeat received")
-                    continue
+                    if msg_data.get("event") in {"subscriptionStatus", "heartbeat"}:
+                        continue
 
                 if isinstance(msg_data, list) and len(msg_data) >= 4:
                     channel = msg_data[2]
@@ -159,18 +164,21 @@ async def collector(pairs=["XBT/USD"]):
                         await handle_orderbook(pair, data)
 
             except Exception:
-                logger.error("Collector error inside stream loop:")
+                logger.error("Stream error:")
                 logger.error(traceback.format_exc())
 
+
 async def main():
+    init_pg()
     await init_redis()
     while True:
         try:
             await collector()
         except Exception:
-            logger.error("Collector crashed. Restarting in 5 seconds.")
+            logger.error("Collector crashed. Restarting in 5s...")
             logger.error(traceback.format_exc())
             await asyncio.sleep(5)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
