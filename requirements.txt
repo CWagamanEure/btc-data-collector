@@ -1,0 +1,14 @@
+asyncio
+aioredis
+psycopg2-binary
+sqlalchemy
+pandas
+numpy
+xgboost
+scikit-learn
+loguru
+python-dotenv
+websockets
+matplotlib
+joblib
+redis
