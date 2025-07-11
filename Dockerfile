@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "data_ingestion/kraken_collector.py"]
+CMD ["python", "kraken_collector.py"]
